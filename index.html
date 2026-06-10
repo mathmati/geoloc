@@ -9,6 +9,283 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
   :root{
+    --ink:#e8ece4;--dim:#8a9184;--panel:#10130fdd;--line:#2a2f27;--accent:#d8ff5f;
+    --mono:ui-monospace,"Cascadia Mono","Roboto Mono",Menlo,monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#10130f}
+  body{font-family:var(--mono);color:var(--ink);-webkit-user-select:none;user-select:none}
+  #map{position:fixed;inset:0;background:#10130f}
+  .leaflet-control-attribution{font-size:9px;background:#10130fb0!important;color:var(--dim)!important}
+  .leaflet-control-attribution a{color:var(--dim)!important}
+  #panel{
+    position:fixed;left:12px;right:12px;bottom:max(12px,env(safe-area-inset-bottom));
+    background:var(--panel);backdrop-filter:blur(8px);
+    border:1px solid var(--line);border-radius:14px;
+    padding:14px 16px;z-index:1000;display:flex;align-items:center;gap:16px;
+  }
+  #compassBox{flex:0 0 auto;text-align:center}
+  #dial{width:64px;height:64px}
+  #headingTxt{font-size:11px;color:var(--dim);margin-top:2px;letter-spacing:.08em}
+  #coords{flex:1;min-width:0}
+  .label{font-size:9px;letter-spacing:.18em;color:var(--dim);text-transform:uppercase}
+  .val{font-size:17px;letter-spacing:.02em;margin:1px 0 7px;white-space:nowrap}
+  #meta{font-size:10px;color:var(--dim);letter-spacing:.05em}
+  #status{
+    position:fixed;top:max(12px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);
+    background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:7px 16px;font-size:11px;letter-spacing:.06em;color:var(--dim);z-index:1000;
+    transition:opacity .4s;white-space:nowrap;
+  }
+  #status.hide{opacity:0;pointer-events:none}
+  #recenter{
+    position:fixed;right:12px;bottom:128px;z-index:1000;
+    width:44px;height:44px;border-radius:50%;
+    background:var(--panel);border:1px solid var(--line);color:var(--ink);
+    font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;
+  }
+  #camBtn{
+    position:fixed;left:12px;bottom:128px;z-index:1000;
+    width:44px;height:44px;border-radius:50%;
+    background:var(--accent);border:none;color:#10130f;
+    font-size:20px;line-height:1;display:flex;align-items:center;justify-content:center;
+    cursor:pointer;box-shadow:0 2px 12px #d8ff5f44;
+  }
+  #camBtn:active{transform:scale(.92)}
+  #copied{
+    position:fixed;left:50%;bottom:140px;transform:translateX(-50%);
+    background:var(--accent);color:#10130f;border-radius:999px;
+    padding:6px 14px;font-size:11px;letter-spacing:.06em;z-index:1001;
+    opacity:0;transition:opacity .3s;pointer-events:none;
+  }
+  .me{position:relative}
+  .me .cone{
+    position:absolute;left:50%;top:50%;width:0;height:0;
+    border-left:13px solid transparent;border-right:13px solid transparent;
+    border-bottom:30px solid #d8ff5f55;transform-origin:50% 100%;
+    transform:translate(-50%,-100%) rotate(var(--h,0deg));transition:transform .25s linear;
+  }
+  .me .dot{
+    position:absolute;left:50%;top:50%;width:14px;height:14px;transform:translate(-50%,-50%);
+    background:var(--accent);border:2.5px solid #10130f;border-radius:50%;box-shadow:0 0 0 2px var(--accent);
+  }
+  @media(prefers-reduced-motion:reduce){.me .cone{transition:none}}
+  #preview{
+    position:fixed;inset:0;z-index:2000;background:#10130f;
+    display:none;flex-direction:column;align-items:center;justify-content:center;
+  }
+  #preview.show{display:flex}
+  #preview canvas{max-width:100%;max-height:70vh;border-radius:8px}
+  #previewBar{display:flex;gap:12px;margin-top:16px}
+  #previewBar button{
+    padding:10px 24px;border-radius:999px;border:none;
+    font-family:var(--mono);font-size:13px;letter-spacing:.06em;cursor:pointer;
+  }
+  #btnSave{background:var(--accent);color:#10130f;font-weight:700}
+  #btnDiscard{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="status">acquiring GPS\u2026</div>
+<button id="camBtn" aria-label="Take geotagged photo">\ud83d\udcf7</button>
+<button id="recenter" aria-label="Recenter on my position">\u25ce</button>
+<div id="panel" role="button" aria-label="Tap to copy coordinates">
+  <div id="compassBox">
+    <svg id="dial" viewBox="0 0 64 64" aria-hidden="true">
+      <circle cx="32" cy="32" r="29" fill="none" stroke="#2a2f27" stroke-width="1.5"/>
+      <text x="32" y="11" text-anchor="middle" font-size="8" fill="#8a9184" font-family="inherit">N</text>
+      <g id="needle" transform="rotate(0 32 32)"><polygon points="32,12 36.5,36 32,32.5 27.5,36" fill="#d8ff5f"/></g>
+      <circle cx="32" cy="32" r="2.4" fill="#e8ece4"/>
+    </svg>
+    <div id="headingTxt">--\u00b0</div>
+  </div>
+  <div id="coords">
+    <div class="label">Latitude</div><div class="val" id="lat">--.------</div>
+    <div class="label">Longitude</div><div class="val" id="lon">--.------</div>
+    <div id="meta">\u00b1-- m \u00b7 tap to copy</div>
+  </div>
+</div>
+<div id="copied">copied</div>
+<input type="file" id="camInput" accept="image/*" capture="environment" style="display:none">
+<div id="preview"><canvas id="stampCanvas"></canvas>
+  <div id="previewBar"><button id="btnDiscard">Discard</button><button id="btnSave">Save</button></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
+<script>
+(function(){
+  var latEl=document.getElementById('lat'),lonEl=document.getElementById('lon'),
+      metaEl=document.getElementById('meta'),statusEl=document.getElementById('status'),
+      needle=document.getElementById('needle'),headingTxt=document.getElementById('headingTxt'),
+      copied=document.getElementById('copied');
+  var pos=null,heading=null,follow=true;
+
+  var map=L.map('map',{zoomControl:false,attributionControl:true}).setView([24.49,54.40],13);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+    maxZoom:20,attribution:'\u00a9 OpenStreetMap \u00a9 CARTO'
+  }).addTo(map);
+
+  var icon=L.divIcon({className:'',html:'<div class="me"><div class="cone"></div><div class="dot"></div></div>',iconSize:[0,0]});
+  var marker=null,accCircle=null;
+
+  map.on('dragstart',function(){follow=false;});
+  document.getElementById('recenter').addEventListener('click',function(){
+    follow=true;if(pos)map.setView([pos.lat,pos.lon],Math.max(map.getZoom(),17));
+  });
+
+  function render(){
+    if(!pos)return;
+    latEl.textContent=pos.lat.toFixed(6);lonEl.textContent=pos.lon.toFixed(6);
+    metaEl.textContent='\u00b1'+Math.round(pos.acc)+' m \u00b7 tap to copy';
+    if(!marker){
+      marker=L.marker([pos.lat,pos.lon],{icon:icon,interactive:false}).addTo(map);
+      accCircle=L.circle([pos.lat,pos.lon],{radius:pos.acc,color:'#d8ff5f',weight:1,opacity:.35,fillOpacity:.06}).addTo(map);
+      map.setView([pos.lat,pos.lon],17);statusEl.classList.add('hide');
+    }else{
+      marker.setLatLng([pos.lat,pos.lon]);accCircle.setLatLng([pos.lat,pos.lon]).setRadius(pos.acc);
+      if(follow)map.panTo([pos.lat,pos.lon],{animate:true});
+    }
+    if(heading!=null){
+      var cone=marker&&marker.getElement()&&marker.getElement().querySelector('.cone');
+      if(cone)cone.style.setProperty('--h',heading+'deg');
+      needle.setAttribute('transform','rotate('+heading+' 32 32)');
+      headingTxt.textContent=Math.round(heading)+'\u00b0';
+    }
+  }
+
+  if(!navigator.geolocation){statusEl.textContent='geolocation unsupported';}
+  else{
+    navigator.geolocation.watchPosition(function(p){
+      pos={lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy};
+      if(p.coords.heading!=null&&!isNaN(p.coords.heading)&&heading==null)heading=p.coords.heading;
+      render();
+    },function(e){
+      statusEl.classList.remove('hide');
+      statusEl.textContent=e.code===1?'location permission denied':'GPS error \u00b7 retrying';
+    },{enableHighAccuracy:true,maximumAge:1000,timeout:20000});
+  }
+
+  function onOrient(e){
+    var a=(e.absolute||e.type==='deviceorientationabsolute')?e.alpha:e.alpha;
+    if(a==null)return;heading=(360-a)%360;render();
+  }
+  if('ondeviceorientationabsolute' in window){
+    window.addEventListener('deviceorientationabsolute',onOrient,true);
+  }else if(window.DeviceOrientationEvent){
+    if(typeof DeviceOrientationEvent.requestPermission==='function'){
+      document.body.addEventListener('click',function once(){
+        DeviceOrientationEvent.requestPermission().then(function(s){
+          if(s==='granted')window.addEventListener('deviceorientation',onOrient,true);
+        }).catch(function(){});document.body.removeEventListener('click',once);
+      });
+    }else{window.addEventListener('deviceorientation',onOrient,true);}
+  }
+
+  document.getElementById('panel').addEventListener('click',function(){
+    if(!pos)return;
+    var txt=pos.lat.toFixed(6)+', '+pos.lon.toFixed(6);
+    (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(function(){
+      copied.style.opacity=1;setTimeout(function(){copied.style.opacity=0;},1200);
+    }).catch(function(){
+      var t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);
+      t.select();document.execCommand('copy');document.body.removeChild(t);
+      copied.style.opacity=1;setTimeout(function(){copied.style.opacity=0;},1200);
+    });
+  });
+
+  // ---- CAMERA + GEOTAG STAMP ----
+  var camInput=document.getElementById('camInput');
+  var preview=document.getElementById('preview');
+  var stampCanvas=document.getElementById('stampCanvas');
+  var snapPos=null; // capture GPS at moment of photo
+
+  // Camera always available - no GPS gate
+  document.getElementById('camBtn').addEventListener('click',function(){
+    // Snapshot current GPS (may be null if no fix yet)
+    snapPos=pos?{lat:pos.lat,lon:pos.lon,acc:pos.acc}:null;
+    camInput.click();
+  });
+
+  camInput.addEventListener('change',function(e){
+    var file=e.target.files[0];if(!file)return;
+
+    // Try to read EXIF GPS from the photo if we have no live GPS
+    var usePos=snapPos; // prefer live GPS snapshot
+
+    var img=new Image();
+    img.onload=function(){
+      var w=img.width,h=img.height;
+      stampCanvas.width=w;stampCanvas.height=h;
+      var ctx=stampCanvas.getContext('2d');
+      ctx.drawImage(img,0,0);
+
+      var barH=Math.max(80,Math.round(h*0.08));
+      var fs=Math.max(14,Math.round(barH*0.22));
+
+      // semi-transparent dark bar at bottom
+      ctx.fillStyle='rgba(16,19,15,0.75)';
+      ctx.fillRect(0,h-barH,w,barH);
+      ctx.fillStyle='#d8ff5f';
+      ctx.fillRect(0,h-barH,w,2);
+
+      ctx.fillStyle='#e8ece4';
+      ctx.font=fs+'px ui-monospace,monospace';
+      ctx.textBaseline='top';
+      var pad=Math.round(fs*0.8);
+      var y=h-barH+pad;
+
+      var now=new Date();
+      var dateStr=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+' '+String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+
+      if(usePos){
+        var coordStr=usePos.lat.toFixed(6)+', '+usePos.lon.toFixed(6);
+        var accStr='\u00b1'+Math.round(usePos.acc)+'m';
+        var hdgStr=heading!=null?Math.round(heading)+'\u00b0':'--\u00b0';
+        ctx.fillText(coordStr,pad,y);
+        ctx.fillText(dateStr+'  '+accStr+'  '+hdgStr,pad,y+fs*1.4);
+      }else{
+        // No GPS fix - stamp date only, note no location
+        ctx.fillText('No GPS fix \u2014 location from camera EXIF',pad,y);
+        ctx.fillText(dateStr,pad,y+fs*1.4);
+      }
+
+      ctx.fillStyle='#d8ff5f';
+      ctx.beginPath();ctx.arc(w-pad,h-barH/2,5,0,Math.PI*2);ctx.fill();
+
+      preview.classList.add('show');
+    };
+    img.src=URL.createObjectURL(file);
+    camInput.value='';
+  });
+
+  document.getElementById('btnDiscard').addEventListener('click',function(){preview.classList.remove('show');});
+
+  document.getElementById('btnSave').addEventListener('click',function(){
+    stampCanvas.toBlob(function(blob){
+      var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      var d=new Date();
+      a.download='geotag_'+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+'_'+String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0')+String(d.getSeconds()).padStart(2,'0')+'.jpg';
+      a.click();URL.revokeObjectURL(a.href);
+      preview.classList.remove('show');
+      copied.textContent='saved';copied.style.opacity=1;
+      setTimeout(function(){copied.style.opacity=0;copied.textContent='copied';},1500);
+    },'image/jpeg',0.92);
+  });
+})();
+<\/script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#10130f">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Geotag</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{
     --ink:#e8ece4;
     --dim:#8a9184;
     --panel:#10130fdd;
