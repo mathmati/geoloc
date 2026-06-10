@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#10130f">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Geotag</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{
+    --ink:#e8ece4;
+    --dim:#8a9184;
+    --panel:#10130fdd;
+    --line:#2a2f27;
+    --accent:#d8ff5f;
+    --mono:ui-monospace,"Cascadia Mono","Roboto Mono",Menlo,monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#10130f}
+  body{font-family:var(--mono);color:var(--ink);-webkit-user-select:none;user-select:none}
+  #map{position:fixed;inset:0;background:#10130f}
+  .leaflet-control-attribution{font-size:9px;background:#10130fb0!important;color:var(--dim)!important}
+  .leaflet-control-attribution a{color:var(--dim)!important}
+
+  /* readout panel */
+  #panel{
+    position:fixed;left:12px;right:12px;bottom:max(12px,env(safe-area-inset-bottom));
+    background:var(--panel);backdrop-filter:blur(8px);
+    border:1px solid var(--line);border-radius:14px;
+    padding:14px 16px;z-index:1000;
+    display:flex;align-items:center;gap:16px;
+  }
+  #compassBox{flex:0 0 auto;text-align:center}
+  #dial{width:64px;height:64px}
+  #headingTxt{font-size:11px;color:var(--dim);margin-top:2px;letter-spacing:.08em}
+  #coords{flex:1;min-width:0}
+  .label{font-size:9px;letter-spacing:.18em;color:var(--dim);text-transform:uppercase}
+  .val{font-size:17px;letter-spacing:.02em;margin:1px 0 7px;white-space:nowrap}
+  #meta{font-size:10px;color:var(--dim);letter-spacing:.05em}
+  #status{
+    position:fixed;top:max(12px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);
+    background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:7px 16px;font-size:11px;letter-spacing:.06em;color:var(--dim);z-index:1000;
+    transition:opacity .4s;white-space:nowrap;
+  }
+  #status.hide{opacity:0;pointer-events:none}
+  #recenter{
+    position:fixed;right:12px;bottom:128px;z-index:1000;
+    width:44px;height:44px;border-radius:50%;
+    background:var(--panel);border:1px solid var(--line);color:var(--ink);
+    font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;
+  }
+  #copied{
+    position:fixed;left:50%;bottom:140px;transform:translateX(-50%);
+    background:var(--accent);color:#10130f;border-radius:999px;
+    padding:6px 14px;font-size:11px;letter-spacing:.06em;z-index:1001;
+    opacity:0;transition:opacity .3s;pointer-events:none;
+  }
+  /* the position marker: a direction cone + dot */
+  .me{position:relative}
+  .me .cone{
+    position:absolute;left:50%;top:50%;width:0;height:0;
+    border-left:13px solid transparent;border-right:13px solid transparent;
+    border-bottom:30px solid #d8ff5f55;
+    transform-origin:50% 100%;
+    transform:translate(-50%,-100%) rotate(var(--h,0deg));
+    transition:transform .25s linear;
+  }
+  .me .dot{
+    position:absolute;left:50%;top:50%;width:14px;height:14px;
+    transform:translate(-50%,-50%);
+    background:var(--accent);border:2.5px solid #10130f;border-radius:50%;
+    box-shadow:0 0 0 2px var(--accent);
+  }
+  @media (prefers-reduced-motion: reduce){.me .cone{transition:none}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="status">acquiring GPS…</div>
+<button id="recenter" aria-label="Recenter on my position">◎</button>
+<div id="panel" role="button" aria-label="Tap to copy coordinates">
+  <div id="compassBox">
+    <svg id="dial" viewBox="0 0 64 64" aria-hidden="true">
+      <circle cx="32" cy="32" r="29" fill="none" stroke="#2a2f27" stroke-width="1.5"/>
+      <text x="32" y="11" text-anchor="middle" font-size="8" fill="#8a9184" font-family="inherit">N</text>
+      <g id="needle" transform="rotate(0 32 32)">
+        <polygon points="32,12 36.5,36 32,32.5 27.5,36" fill="#d8ff5f"/>
+      </g>
+      <circle cx="32" cy="32" r="2.4" fill="#e8ece4"/>
+    </svg>
+    <div id="headingTxt">--°</div>
+  </div>
+  <div id="coords">
+    <div class="label">Latitude</div>
+    <div class="val" id="lat">--.------</div>
+    <div class="label">Longitude</div>
+    <div class="val" id="lon">--.------</div>
+    <div id="meta">±-- m · tap to copy</div>
+  </div>
+</div>
+<div id="copied">copied</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+  var latEl=document.getElementById('lat'),lonEl=document.getElementById('lon'),
+      metaEl=document.getElementById('meta'),statusEl=document.getElementById('status'),
+      needle=document.getElementById('needle'),headingTxt=document.getElementById('headingTxt'),
+      copied=document.getElementById('copied');
+  var pos=null,heading=null,follow=true;
+
+  var map=L.map('map',{zoomControl:false,attributionControl:true}).setView([24.49,54.40],13);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+    maxZoom:20,attribution:'&copy; OpenStreetMap &copy; CARTO'
+  }).addTo(map);
+
+  var icon=L.divIcon({className:'',html:'<div class="me"><div class="cone"></div><div class="dot"></div></div>',iconSize:[0,0]});
+  var marker=null,accCircle=null;
+
+  map.on('dragstart',function(){follow=false;});
+  document.getElementById('recenter').addEventListener('click',function(){
+    follow=true;
+    if(pos)map.setView([pos.lat,pos.lon],Math.max(map.getZoom(),17));
+  });
+
+  function render(){
+    if(!pos)return;
+    latEl.textContent=pos.lat.toFixed(6);
+    lonEl.textContent=pos.lon.toFixed(6);
+    metaEl.textContent='±'+Math.round(pos.acc)+' m · tap to copy';
+    if(!marker){
+      marker=L.marker([pos.lat,pos.lon],{icon:icon,interactive:false}).addTo(map);
+      accCircle=L.circle([pos.lat,pos.lon],{radius:pos.acc,color:'#d8ff5f',weight:1,opacity:.35,fillOpacity:.06}).addTo(map);
+      map.setView([pos.lat,pos.lon],17);
+      statusEl.classList.add('hide');
+    }else{
+      marker.setLatLng([pos.lat,pos.lon]);
+      accCircle.setLatLng([pos.lat,pos.lon]).setRadius(pos.acc);
+      if(follow)map.panTo([pos.lat,pos.lon],{animate:true});
+    }
+    if(heading!=null){
+      var cone=marker&&marker.getElement()&&marker.getElement().querySelector('.cone');
+      if(cone)cone.style.setProperty('--h',heading+'deg');
+      needle.setAttribute('transform','rotate('+heading+' 32 32)');
+      headingTxt.textContent=Math.round(heading)+'°';
+    }
+  }
+
+  if(!navigator.geolocation){
+    statusEl.textContent='geolocation unsupported';
+  }else{
+    navigator.geolocation.watchPosition(function(p){
+      pos={lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy};
+      if(p.coords.heading!=null&&!isNaN(p.coords.heading)&&heading==null)heading=p.coords.heading;
+      render();
+    },function(e){
+      statusEl.classList.remove('hide');
+      statusEl.textContent=e.code===1?'location permission denied':'GPS error · retrying';
+    },{enableHighAccuracy:true,maximumAge:1000,timeout:20000});
+  }
+
+  // compass: Android Chrome fires deviceorientationabsolute
+  function onOrient(e){
+    var a=(e.absolute||e.type==='deviceorientationabsolute')?e.alpha:e.alpha;
+    if(a==null)return;
+    heading=(360-a)%360;
+    render();
+  }
+  if('ondeviceorientationabsolute' in window){
+    window.addEventListener('deviceorientationabsolute',onOrient,true);
+  }else if(window.DeviceOrientationEvent){
+    if(typeof DeviceOrientationEvent.requestPermission==='function'){
+      document.body.addEventListener('click',function once(){
+        DeviceOrientationEvent.requestPermission().then(function(s){
+          if(s==='granted')window.addEventListener('deviceorientation',onOrient,true);
+        }).catch(function(){});
+        document.body.removeEventListener('click',once);
+      });
+    }else{
+      window.addEventListener('deviceorientation',onOrient,true);
+    }
+  }
+
+  document.getElementById('panel').addEventListener('click',function(){
+    if(!pos)return;
+    var txt=pos.lat.toFixed(6)+', '+pos.lon.toFixed(6);
+    (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(function(){
+      copied.style.opacity=1;setTimeout(function(){copied.style.opacity=0;},1200);
+    }).catch(function(){
+      var t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);
+      t.select();document.execCommand('copy');document.body.removeChild(t);
+      copied.style.opacity=1;setTimeout(function(){copied.style.opacity=0;},1200);
+    });
+  });
+})();
+</script>
+</body>
+</html>
